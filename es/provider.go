@@ -545,18 +545,24 @@ func getKibanaClient(conf *ProviderConf) (interface{}, error) {
 	}
 }
 
-func assumeRoleCredentials(region, roleARN, profile string) *awscredentials.Credentials {
+func assumeRoleCredentials(region, roleARN, profile string) (*awscredentials.Credentials, error) {
 	sessOpts := awsSessionOptions(region)
 	sessOpts.Profile = profile
 
 	sess := awssession.Must(awssession.NewSessionWithOptions(sessOpts))
+
 	stsClient := awssts.New(sess)
 	assumeRoleProvider := &awsstscreds.AssumeRoleProvider{
 		Client:  stsClient,
 		RoleARN: roleARN,
 	}
 
-	return awscredentials.NewChainCredentials([]awscredentials.Provider{assumeRoleProvider})
+	_, err := assumeRoleProvider.Retrieve()
+	if err != nil {
+		return nil, err
+	}
+
+	return awscredentials.NewChainCredentials([]awscredentials.Provider{assumeRoleProvider}), nil
 }
 
 func awsSessionOptions(region string) awssession.Options {
@@ -579,7 +585,7 @@ func awsSessionOptions(region string) awssession.Options {
 	}
 }
 
-func awsSession(region string, conf *ProviderConf) *awssession.Session {
+func awsSession(region string, conf *ProviderConf) (*awssession.Session, error) {
 	sessOpts := awsSessionOptions(region)
 
 	// 1. access keys take priority
@@ -591,7 +597,11 @@ func awsSession(region string, conf *ProviderConf) *awssession.Session {
 	if conf.awsAccessKeyId != "" {
 		sessOpts.Config.Credentials = awscredentials.NewStaticCredentials(conf.awsAccessKeyId, conf.awsSecretAccessKey, conf.awsSessionToken)
 	} else if conf.awsAssumeRoleArn != "" {
-		sessOpts.Config.Credentials = assumeRoleCredentials(region, conf.awsAssumeRoleArn, conf.awsProfile)
+		creds, err := assumeRoleCredentials(region, conf.awsAssumeRoleArn, conf.awsProfile)
+		if err != nil {
+			return nil, err
+		}
+		sessOpts.Config.Credentials = creds
 	} else if conf.awsProfile != "" {
 		sessOpts.Profile = conf.awsProfile
 	}
@@ -610,14 +620,24 @@ func awsSession(region string, conf *ProviderConf) *awssession.Session {
 		sessOpts.Config.HTTPClient = client
 	}
 
-	return awssession.Must(awssession.NewSessionWithOptions(sessOpts))
+	session, err := awssession.NewSessionWithOptions(sessOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	return session, nil
+
 }
 
 func awsHttpClient(region string, conf *ProviderConf, headers map[string]string) (*http.Client, error) {
-	session := awsSession(region, conf)
+	session, err := awsSession(region, conf)
+	if err != nil {
+		return nil, err
+	}
+
 	// Call Get() to ensure concurrency safe retrieval of credentials. Since the
 	// client is created in many go routines, this synchronizes it.
-	_, err := session.Config.Credentials.Get()
+	_, err = session.Config.Credentials.Get()
 	if err != nil {
 		return nil, err
 	}
